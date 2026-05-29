@@ -1,6 +1,6 @@
 import { Injectable } from '@angular/core';
-import { Observable, forkJoin } from 'rxjs';
-import { map, shareReplay } from 'rxjs/operators';
+import { Observable, forkJoin, of } from 'rxjs';
+import { catchError, map, shareReplay } from 'rxjs/operators';
 import { API_ENDPOINTS } from '../../../core/constants/api-endpoints';
 import { HttpClientService } from '../../../core/services/http-client.service';
 import { RiskLevel } from '../../../core/models/common.model';
@@ -41,16 +41,21 @@ export class DashboardService {
   getDashboardView(): Observable<DashboardViewModel> {
     if (!this.viewCache$) {
       this.viewCache$ = forkJoin({
-        summaryDto: this.getSummaryDto(),
-        topRiskClaims: this.getDashboardClaims(),
+        summaryDto: this.getSummaryDto().pipe(catchError(() => of(null))),
+        topRiskClaims: this.getDashboardClaims().pipe(catchError(() => of([]))),
       }).pipe(
-        map(({ summaryDto, topRiskClaims }) => ({
-          summary: mapDashboardSummaryFromApi(summaryDto),
-          riskDistribution: mapRiskDistributionFromApi(summaryDto),
-          topRiskClaims,
-          branchRisk: [],
-          alertRanking: [],
-        })),
+        map(({ summaryDto, topRiskClaims }) => {
+          const fallbackSummary = this.buildSummaryFromClaims(topRiskClaims);
+          return {
+            summary: summaryDto ? mapDashboardSummaryFromApi(summaryDto) : fallbackSummary,
+            riskDistribution: summaryDto
+              ? mapRiskDistributionFromApi(summaryDto)
+              : this.buildRiskDistributionFromClaims(topRiskClaims),
+            topRiskClaims,
+            branchRisk: [],
+            alertRanking: [],
+          };
+        }),
         shareReplay(1),
       );
     }
@@ -64,11 +69,11 @@ export class DashboardService {
   getAnalyticsData(): Observable<Pick<DashboardViewModel, 'branchRisk' | 'alertRanking'>> {
     if (!this.analyticsCache$) {
       this.analyticsCache$ = forkJoin({
-        summaryDto: this.getSummaryDto(),
-        alertRanking: this.getAlertRanking(),
+        summaryDto: this.getSummaryDto().pipe(catchError(() => of(null))),
+        alertRanking: this.getAlertRanking().pipe(catchError(() => of([]))),
       }).pipe(
         map(({ summaryDto, alertRanking }) => ({
-          branchRisk: mapBranchRiskFromSummary(summaryDto),
+          branchRisk: summaryDto ? mapBranchRiskFromSummary(summaryDto) : [],
           alertRanking,
         })),
         shareReplay(1),
@@ -100,7 +105,7 @@ export class DashboardService {
   getDashboardClaims(riskLevel: RiskLevel | '' = '', limit = 20): Observable<TopRiskClaim[]> {
     const normalizedRiskLevel = riskLevel === 'critico' ? 'rojo' : riskLevel || undefined;
     return this.http
-      .get<ClaimListApiResponse>(API_ENDPOINTS.claims.list, {
+      .get<ClaimListApiResponse | ClaimApiDto[]>(API_ENDPOINTS.claims.list, {
         limit,
         offset: 0,
         risk_level: normalizedRiskLevel,
@@ -108,7 +113,7 @@ export class DashboardService {
       })
       .pipe(
         map((response) =>
-          response.items
+          this.resolveClaimItems(response)
             .map(mapTopRiskClaimFromApi)
             .sort((left, right) => right.finalScore - left.finalScore)
         )
@@ -129,5 +134,46 @@ export class DashboardService {
 
   private getSummaryDto(): Observable<DashboardSummaryApiDto> {
     return this.http.get<DashboardSummaryApiDto>(API_ENDPOINTS.analytics.summary);
+  }
+
+  private resolveClaimItems(response: ClaimListApiResponse | ClaimApiDto[]): ClaimApiDto[] {
+    return Array.isArray(response) ? response : response.items ?? [];
+  }
+
+  private buildSummaryFromClaims(claims: TopRiskClaim[]): DashboardSummary {
+    const totalClaims = claims.length;
+    const averageScore = totalClaims
+      ? Math.round(claims.reduce((sum, claim) => sum + claim.finalScore, 0) / totalClaims)
+      : 0;
+    const highRiskClaims = claims.filter((claim) => claim.riskLevel === 'rojo' || claim.riskLevel === 'critico');
+
+    return {
+      totalClaims,
+      assessedClaims: totalClaims,
+      pendingClaims: 0,
+      greenClaims: claims.filter((claim) => claim.riskLevel === 'verde').length,
+      yellowClaims: claims.filter((claim) => claim.riskLevel === 'amarillo').length,
+      redClaims: highRiskClaims.length,
+      averageScore,
+      totalClaimedAmount: claims.reduce((sum, claim) => sum + claim.claimedAmount, 0),
+      highRiskAmount: highRiskClaims.reduce((sum, claim) => sum + claim.claimedAmount, 0),
+    };
+  }
+
+  private buildRiskDistributionFromClaims(claims: TopRiskClaim[]): RiskDistributionItem[] {
+    const totalClaims = claims.length;
+    const levels: RiskLevel[] = ['rojo', 'amarillo', 'verde', 'critico'];
+
+    return levels
+      .map((level) => {
+        const count = claims.filter((claim) => claim.riskLevel === level).length;
+        return {
+          level,
+          label: level,
+          count,
+          percentage: totalClaims ? Math.round((count / totalClaims) * 100) : 0,
+        };
+      })
+      .filter((item) => item.count > 0);
   }
 }
