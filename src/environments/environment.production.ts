@@ -1,5 +1,5 @@
 export const environment = {
-  apiBaseUrl: 'https://api.example.com/api/v1',
+  apiBaseUrl: 'https://backend-fraudia.onrender.com/api',
   appEnv: 'production',
   enableMockData: false,
   production: true,
