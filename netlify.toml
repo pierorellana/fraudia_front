@@ -3,6 +3,12 @@
   publish = "dist/fraudia-fe/browser"
 
 [[redirects]]
+  from = "/api/*"
+  to = "https://backend-fraudia.onrender.com/api/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
   from = "/*"
   to = "/index.html"
   status = 200
